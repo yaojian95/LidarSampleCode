@@ -2,9 +2,12 @@
 #include "VzCoalDeviceHeader.h"
 #include "windows.h"
 #include <direct.h>
+#include <fstream>
 #include <iostream>
 #include <stdio.h>
+#include <string>
 #include <time.h>
+#include <vector>
 
 static unsigned int g_nLoopTimes = 10;
 static bool g_bSaveDepthMap = false;
@@ -12,6 +15,33 @@ static int g_nSaveDepthMapMaxFrames = 10;
 static int g_nSavedDepthMapCount = 0;
 // Force high resolution (use fYScale) to avoid downsampling at edges
 static bool g_bForceHighRes = false;
+
+// Save stitched line-scan points as fixed-length PLY segments.
+static bool g_bSavePlyByLength = false;
+static float g_fPlySegmentLengthMM = 1000.0f;
+static float g_fLineRateHz = 30.0f;
+static float g_fBeltSpeedMMPerSec = 300.0f;
+static int g_nSavedPlySegmentCount = 0;
+static int g_nMaxPlySegmentFiles = 0; // 0 means unlimited
+
+static float _GetMmPerFrame() {
+  if (g_fLineRateHz <= 0.0f) {
+    return 0.0f;
+  }
+  return g_fBeltSpeedMMPerSec / g_fLineRateHz;
+}
+
+static int _GetLinesPerPlySegment() {
+  if (g_fPlySegmentLengthMM <= 0.0f) {
+    return 0;
+  }
+  float fMmPerFrame = _GetMmPerFrame();
+  if (fMmPerFrame <= 0.0f) {
+    return 0;
+  }
+  int nLines = (int)(g_fPlySegmentLengthMM / fMmPerFrame + 0.5f);
+  return nLines > 0 ? nLines : 1;
+}
 
 /// @brief
 /// 煤流数据回调函数
@@ -22,6 +52,10 @@ public:
     m_fTotleVolume = 0.f;
     m_pDevice = pDevice;
     m_nDepthMapIdx = 0;
+    m_llLastFrameIdx = 0;
+    m_bHasLastFrame = false;
+    m_nAccumulatedLines = 0;
+    m_bPrevSavePlyEnabled = false;
   }
   virtual ~CVzDeviceDataCallBack() { ; }
 
@@ -73,10 +107,17 @@ public:
                                         unsigned long long llTimeStamp);
 
 protected:
+  bool SavePlySegment();
+
   unsigned int m_nTimeIdx;
   float m_fTotleVolume;
   IVzCoalDevice *m_pDevice;
   int m_nDepthMapIdx;
+  std::vector<SVzNLPointXYZRGBA> m_vSegmentPoints;
+  unsigned long long m_llLastFrameIdx;
+  bool m_bHasLastFrame;
+  int m_nAccumulatedLines;
+  bool m_bPrevSavePlyEnabled;
 };
 
 /// @brief
@@ -115,6 +156,109 @@ void CVzDeviceDataCallBack::OnOutputObjResult(SVzNLPointXYZRGBA *p3DPoint,
                                               unsigned long long llTimeStamp,
                                               unsigned short shBlockID) {
   // printf("Output Obj PointCount %d FrameIndex %lld\r\n", nCount, nFrameIdx);
+  if (!g_bSavePlyByLength) {
+    if (m_bPrevSavePlyEnabled) {
+      m_vSegmentPoints.clear();
+      m_nAccumulatedLines = 0;
+      m_bHasLastFrame = false;
+    }
+    m_bPrevSavePlyEnabled = false;
+    return;
+  }
+
+  if (!m_bPrevSavePlyEnabled) {
+    m_vSegmentPoints.clear();
+    m_nAccumulatedLines = 0;
+    m_bHasLastFrame = false;
+  }
+  m_bPrevSavePlyEnabled = true;
+
+  if (p3DPoint == nullptr || nCount <= 0) {
+    return;
+  }
+
+  if (g_nMaxPlySegmentFiles > 0 &&
+      g_nSavedPlySegmentCount >= g_nMaxPlySegmentFiles) {
+    g_bSavePlyByLength = false;
+    return;
+  }
+
+  m_vSegmentPoints.insert(m_vSegmentPoints.end(), p3DPoint, p3DPoint + nCount);
+
+  if (!m_bHasLastFrame) {
+    m_llLastFrameIdx = nFrameIdx;
+    m_bHasLastFrame = true;
+    m_nAccumulatedLines += 1;
+  } else if (nFrameIdx > m_llLastFrameIdx) {
+    m_nAccumulatedLines += (int)(nFrameIdx - m_llLastFrameIdx);
+    m_llLastFrameIdx = nFrameIdx;
+  }
+
+  int nLinesPerSegment = _GetLinesPerPlySegment();
+  if (nLinesPerSegment <= 0) {
+    return;
+  }
+
+  if (m_nAccumulatedLines >= nLinesPerSegment) {
+    if (SavePlySegment()) {
+      m_nAccumulatedLines -= nLinesPerSegment;
+      if (m_nAccumulatedLines < 0) {
+        m_nAccumulatedLines = 0;
+      }
+      m_vSegmentPoints.clear();
+    }
+  }
+}
+
+bool CVzDeviceDataCallBack::SavePlySegment() {
+  if (m_vSegmentPoints.empty()) {
+    return false;
+  }
+
+  _mkdir("PlySegments");
+
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  char szFileName[256] = {0};
+  sprintf_s(szFileName,
+            "PlySegments/Segment_%04d%02d%02d_%02d%02d%02d_%03d_%04d.ply",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+            st.wMilliseconds, g_nSavedPlySegmentCount + 1);
+
+  std::ofstream ofs(szFileName, std::ios::out | std::ios::trunc);
+  if (!ofs.is_open()) {
+    printf("Failed to open PLY file: %s\n", szFileName);
+    return false;
+  }
+
+  ofs << "ply\n";
+  ofs << "format ascii 1.0\n";
+  ofs << "element vertex " << m_vSegmentPoints.size() << "\n";
+  ofs << "property float x\n";
+  ofs << "property float y\n";
+  ofs << "property float z\n";
+  ofs << "end_header\n";
+
+  for (size_t i = 0; i < m_vSegmentPoints.size(); ++i) {
+    const SVzNLPointXYZRGBA &pt = m_vSegmentPoints[i];
+    ofs << pt.x << " " << pt.y << " " << pt.z << "\n";
+  }
+  ofs.close();
+
+  ++g_nSavedPlySegmentCount;
+  printf(
+      "Saved PLY segment: %s (segment=%d, targetLength=%.2f mm, lines=%d)\n",
+      szFileName, g_nSavedPlySegmentCount, g_fPlySegmentLengthMM,
+      _GetLinesPerPlySegment());
+
+  if (g_nMaxPlySegmentFiles > 0 &&
+      g_nSavedPlySegmentCount >= g_nMaxPlySegmentFiles) {
+    g_bSavePlyByLength = false;
+    printf("Reached max PLY segment files: %d, auto disabled.\n",
+           g_nMaxPlySegmentFiles);
+  }
+
+  return true;
 }
 
 /// @brief
@@ -599,6 +743,39 @@ static void _OnMenuSetSaveDepthMapFrames() {
   printf("Max Frames set to %d.\n", g_nSaveDepthMapMaxFrames);
 }
 
+static void _OnMenuEnableSavePlyByLength() {
+  int nEnable = 0;
+  printf("Enable Save PLY By Belt Length (0: Disable, 1: Enable): ");
+  scanf_s("%d", &nEnable);
+  g_bSavePlyByLength = (nEnable != 0);
+
+  if (g_bSavePlyByLength) {
+    g_nSavedPlySegmentCount = 0;
+    printf("PLY segment saving enabled. Segment Length: %.2f mm, Speed: %.2f "
+           "mm/s, LineRate: %.2f Hz, Lines/Segment: %d\n",
+           g_fPlySegmentLengthMM, g_fBeltSpeedMMPerSec, g_fLineRateHz,
+           _GetLinesPerPlySegment());
+  } else {
+    printf("PLY segment saving disabled.\n");
+  }
+}
+
+static void _OnMenuSetPlySegmentParams() {
+  printf("Input Segment Length (mm): ");
+  scanf_s("%f", &g_fPlySegmentLengthMM);
+  printf("Input Line Rate (Hz): ");
+  scanf_s("%f", &g_fLineRateHz);
+  printf("Input Belt Speed (mm/s): ");
+  scanf_s("%f", &g_fBeltSpeedMMPerSec);
+  printf("Input Max PLY Segment Files (0 for unlimited): ");
+  scanf_s("%d", &g_nMaxPlySegmentFiles);
+
+  printf("PLY Params Updated: Segment=%.2f mm, LineRate=%.2f Hz, Speed=%.2f "
+         "mm/s, MmPerFrame=%.4f, Lines/Segment=%d, MaxFiles=%d\n",
+         g_fPlySegmentLengthMM, g_fLineRateHz, g_fBeltSpeedMMPerSec,
+         _GetMmPerFrame(), _GetLinesPerPlySegment(), g_nMaxPlySegmentFiles);
+}
+
 /// <summary>
 /// 功能定义列表
 /// </summary>
@@ -621,7 +798,9 @@ enum {
   keMenuID_StartStopCapture,     //< 开始/停止采集
   keMenuID_SetLoopTime,          //< 设置记录时间
   keMenuID_EnableSaveDepthMap,   //< 启用/禁用保存深度图
-  keMenuID_SetSaveDepthMapFrames //< 设置保存深度图帧数
+  keMenuID_SetSaveDepthMapFrames, //< 设置保存深度图帧数
+  keMenuID_EnableSavePlyByLength, //< 启用/禁用按长度保存PLY
+  keMenuID_SetPlySegmentParams    //< 设置PLY分段参数
 };
 
 // Process Device
@@ -653,6 +832,9 @@ static void _OnProcessDevice(IVzCoalDevice *pICoalDevice) {
     printf("%d. Enable/Disable Save Depth Map\r\n",
            keMenuID_EnableSaveDepthMap);
     printf("%d. Set Save Depth Map Frames\r\n", keMenuID_SetSaveDepthMapFrames);
+        printf("%d. Enable/Disable Save PLY By Belt Length\r\n",
+          keMenuID_EnableSavePlyByLength);
+        printf("%d. Set PLY Segment Params\r\n", keMenuID_SetPlySegmentParams);
     printf("0. Exit\r\n");
 
     unsigned int nMenuID = 0;
@@ -732,6 +914,14 @@ static void _OnProcessDevice(IVzCoalDevice *pICoalDevice) {
     }
     case keMenuID_SetSaveDepthMapFrames: {
       _OnMenuSetSaveDepthMapFrames();
+      break;
+    }
+    case keMenuID_EnableSavePlyByLength: {
+      _OnMenuEnableSavePlyByLength();
+      break;
+    }
+    case keMenuID_SetPlySegmentParams: {
+      _OnMenuSetPlySegmentParams();
       break;
     }
     case keMenuID_Calib: // 标定传送带
