@@ -19,13 +19,21 @@ include_directories(${SDK_INC})
 link_directories(${SDK_LIB_DIR})
 
 add_executable(VzCoalSample main.cpp)
+add_executable(VzCoalSegmentSaver ply_segment_runner.cpp)
 
 # Link against the necessary libraries
 target_link_libraries(VzCoalSample VzCoalDevice)
+target_link_libraries(VzCoalSegmentSaver VzCoalDevice)
 
 # Copy DLLs to output directory for convenience
 add_custom_command(TARGET VzCoalSample POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${SDK_LIB_DIR}
     $<TARGET_FILE_DIR:VzCoalSample>
+)
+
+add_custom_command(TARGET VzCoalSegmentSaver POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${SDK_LIB_DIR}
+    $<TARGET_FILE_DIR:VzCoalSegmentSaver>
 )
