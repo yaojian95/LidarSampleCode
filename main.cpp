@@ -173,18 +173,7 @@ void CVzDeviceDataCallBack::OnOutputObjResult(SVzNLPointXYZRGBA *p3DPoint,
   }
   m_bPrevSavePlyEnabled = true;
 
-  if (p3DPoint == nullptr || nCount <= 0) {
-    return;
-  }
-
-  if (g_nMaxPlySegmentFiles > 0 &&
-      g_nSavedPlySegmentCount >= g_nMaxPlySegmentFiles) {
-    g_bSavePlyByLength = false;
-    return;
-  }
-
-  m_vSegmentPoints.insert(m_vSegmentPoints.end(), p3DPoint, p3DPoint + nCount);
-
+  // Track lines even if p3DPoint is null or nCount <= 0
   if (!m_bHasLastFrame) {
     m_llLastFrameIdx = nFrameIdx;
     m_bHasLastFrame = true;
@@ -192,6 +181,13 @@ void CVzDeviceDataCallBack::OnOutputObjResult(SVzNLPointXYZRGBA *p3DPoint,
   } else if (nFrameIdx > m_llLastFrameIdx) {
     m_nAccumulatedLines += (int)(nFrameIdx - m_llLastFrameIdx);
     m_llLastFrameIdx = nFrameIdx;
+  }
+
+  if (p3DPoint != nullptr && nCount > 0) {
+    if (g_nMaxPlySegmentFiles <= 0 ||
+        g_nSavedPlySegmentCount < g_nMaxPlySegmentFiles) {
+      m_vSegmentPoints.insert(m_vSegmentPoints.end(), p3DPoint, p3DPoint + nCount);
+    }
   }
 
   int nLinesPerSegment = _GetLinesPerPlySegment();
@@ -246,10 +242,9 @@ bool CVzDeviceDataCallBack::SavePlySegment() {
   ofs.close();
 
   ++g_nSavedPlySegmentCount;
-  printf(
-      "Saved PLY segment: %s (segment=%d, targetLength=%.2f mm, lines=%d)\n",
-      szFileName, g_nSavedPlySegmentCount, g_fPlySegmentLengthMM,
-      _GetLinesPerPlySegment());
+  printf("Saved PLY segment: %s (segment=%d, targetLength=%.2f mm, lines=%d)\n",
+         szFileName, g_nSavedPlySegmentCount, g_fPlySegmentLengthMM,
+         _GetLinesPerPlySegment());
 
   if (g_nMaxPlySegmentFiles > 0 &&
       g_nSavedPlySegmentCount >= g_nMaxPlySegmentFiles) {
@@ -582,7 +577,7 @@ static void _OnMenuDetect(IVzCoalDevice *pICoalDevice,
   int nPointCount = 0;
   SVzNLPointXYZRGBA *pCur3DPoint = pICoalDevice->GetBaseLaserLine(nPointCount);
   if (nPointCount == 0) {
-    printf("请先选择传送带标定\n");
+    printf("please calibrate first\n");
     return;
   }
 
@@ -780,24 +775,24 @@ static void _OnMenuSetPlySegmentParams() {
 /// 功能定义列表
 /// </summary>
 enum {
-  keMenuID_QueryDevInfo = 1,     //< 获取设备信息
-  keMenuID_Expose,               //< 设置曝光
-  keMenuID_FrameRate,            //< 设置增益
-  keMenuID_ROI,                  //< 设置ROI
-  keMenuID_LoopTime,             //< 设置检测周期
-  keMenuID_Speed,                //< 设置速度（匀速模式下使用）
-  keMenuID_DistancePls,          //< 设置编码器间距(变速模式下使用)
-  keMenuID_WorkMode,             //< 工作模式：匀速模式，变速模式(编码器模式)
-  keMenuID_Gain,                 //< 设置增益
-  keMenuID_Calib,                //< 标定传送带
-  keMenuID_ResetWorkRange,       //< 重置工作范围
-  keMenuID_QueryTotleVol,        //< 获取总煤量
-  keMenuID_ResetTotleVol,        //< 重置煤流量
-  keMenuID_LaserLightLevel,      //< 调节激光亮度
-  keMenuID_StartStopDetect,      //< 开始/停止检测
-  keMenuID_StartStopCapture,     //< 开始/停止采集
-  keMenuID_SetLoopTime,          //< 设置记录时间
-  keMenuID_EnableSaveDepthMap,   //< 启用/禁用保存深度图
+  keMenuID_QueryDevInfo = 1,      //< 获取设备信息
+  keMenuID_Expose,                //< 设置曝光
+  keMenuID_FrameRate,             //< 设置增益
+  keMenuID_ROI,                   //< 设置ROI
+  keMenuID_LoopTime,              //< 设置检测周期
+  keMenuID_Speed,                 //< 设置速度（匀速模式下使用）
+  keMenuID_DistancePls,           //< 设置编码器间距(变速模式下使用)
+  keMenuID_WorkMode,              //< 工作模式：匀速模式，变速模式(编码器模式)
+  keMenuID_Gain,                  //< 设置增益
+  keMenuID_Calib,                 //< 标定传送带
+  keMenuID_ResetWorkRange,        //< 重置工作范围
+  keMenuID_QueryTotleVol,         //< 获取总煤量
+  keMenuID_ResetTotleVol,         //< 重置煤流量
+  keMenuID_LaserLightLevel,       //< 调节激光亮度
+  keMenuID_StartStopDetect,       //< 开始/停止检测
+  keMenuID_StartStopCapture,      //< 开始/停止采集
+  keMenuID_SetLoopTime,           //< 设置记录时间
+  keMenuID_EnableSaveDepthMap,    //< 启用/禁用保存深度图
   keMenuID_SetSaveDepthMapFrames, //< 设置保存深度图帧数
   keMenuID_EnableSavePlyByLength, //< 启用/禁用按长度保存PLY
   keMenuID_SetPlySegmentParams    //< 设置PLY分段参数
@@ -832,9 +827,9 @@ static void _OnProcessDevice(IVzCoalDevice *pICoalDevice) {
     printf("%d. Enable/Disable Save Depth Map\r\n",
            keMenuID_EnableSaveDepthMap);
     printf("%d. Set Save Depth Map Frames\r\n", keMenuID_SetSaveDepthMapFrames);
-        printf("%d. Enable/Disable Save PLY By Belt Length\r\n",
-          keMenuID_EnableSavePlyByLength);
-        printf("%d. Set PLY Segment Params\r\n", keMenuID_SetPlySegmentParams);
+    printf("%d. Enable/Disable Save PLY By Belt Length\r\n",
+           keMenuID_EnableSavePlyByLength);
+    printf("%d. Set PLY Segment Params\r\n", keMenuID_SetPlySegmentParams);
     printf("0. Exit\r\n");
 
     unsigned int nMenuID = 0;
